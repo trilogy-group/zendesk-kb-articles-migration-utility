@@ -1,14 +1,18 @@
 import json
 import requests
 import os
-from settings import SOURCE_HC_URL, DESTINATION_HC_URL, auth
-authd = requests.auth.HTTPBasicAuth(*auth)
+from settings import SOURCE_HC_URL, DESTINATION_HC_URL, dst_auth, src_auth
+dst_auth = requests.auth.HTTPBasicAuth(*dst_auth)
+src_auth = requests.auth.HTTPBasicAuth(*src_auth)
 headers = {
     'Content-Type': 'application/json',
 }
 
-helpcenter = requests.Session()
-authd(helpcenter)
+dst_helpcenter = requests.Session()
+src_helpcenter = requests.Session()
+
+dst_auth(dst_helpcenter)
+src_auth(src_helpcenter)
 
 
 def make_source_url(*args):
@@ -21,7 +25,7 @@ def make_destination_url(*args):
     return "/".join([DESTINATION_HC_URL, *url_parts])
 
 
-def page_response(response, key):
+def page_response(helpcenter, response, key):
     response = response.json()
     next_url = response.get('next_page', None)
     data = response[key]
@@ -33,13 +37,13 @@ def page_response(response, key):
     return data
 
 
-def get(data_key, url):
+def get(helpcenter, data_key, url):
     response = helpcenter.get(url)
-    return page_response(response, data_key)
+    return page_response(helpcenter, response, data_key)
 
 
 def save_to_file(obj, filename):
-    with open('data/%s.json' % filename, 'w+') as f:
+    with open('data/%s.json' % filename, 'w') as f:
         f.write(json.dumps(obj))
 
 
@@ -49,7 +53,7 @@ def load_from_file(filename):
 
 
 def download(url, filename):
-    get_response = helpcenter.get(url, stream=True)
+    get_response = src_helpcenter.get(url, stream=True)
     filename = 'data/attachments/%s' % filename
     path = os.path.dirname(filename)
     os.makedirs(path, exist_ok=True)
@@ -67,7 +71,7 @@ def get_articles_attachments():
         article_id = article['id']
         url = make_source_url('articles',
                               str(article_id), 'attachments')
-        attachments = get('article_attachments', url)
+        attachments = get(src_helpcenter, 'article_attachments', url)
         for attachment in attachments:
             url = attachment['content_url']
             filename = attachment['file_name']
@@ -76,10 +80,10 @@ def get_articles_attachments():
 
 def dump_source_helpcenter():
     url = make_source_url
-    articles = get('articles', url('articles'))
-    categories = get('categories', url('categories'))
-    sections = get('sections', url('sections'))
-    user_segments = get('user_segments', url('user_segments'))
+    articles = get(src_helpcenter, 'articles', url('articles'))
+    categories = get(src_helpcenter, 'categories', url('categories'))
+    sections = get(src_helpcenter, 'sections', url('sections'))
+    user_segments = get(src_helpcenter, 'user_segments', url('user_segments'))
     save_to_file(articles, 'articles')
     save_to_file(categories, 'categories')
     save_to_file(sections, 'sections')
@@ -111,14 +115,14 @@ def remove_keys(data, keys):
 
 def prepare_articles_for_migration():
     dump_source_helpcenter()
-    user_segments_mapping = {'360000790354': '360000985254',
-                             '360000788034': '360000985234'}
+    user_segments_mapping = {'360000790354': '360000084993',  # Project Rural - Public Articles // signedin
+                             '360000788034': '360000084973'}  # Project Rural - Internal Articles //staff
     default_user_segment = '360000985254'
 
-    categories_mapping = {'360001386453': '360003516014',  # implementation
-                          '360001380034': '360003565573',  # Merchandising
-                          '360001386493': '360003516034',  # Reporting
-                          '360001386473': '360003565573'  # announcements
+    categories_mapping = {'360001386453': '360003515354',  # implementation
+                          '360001380034': '360003564573',  # Merchandising
+                          '360001386493': '360003515394',  # Reporting
+                          '360001386473': '360003515374'  # announcements
                           }
 
     articles = load_from_file('articles')
@@ -130,8 +134,7 @@ def prepare_articles_for_migration():
     articles = [map_source_destination(
         article, 'section_id', categories_mapping, None) for article in articles]
     # cleanup unused keys
-    keys = ['url', 'html_url', 'author_id', 'created_at',
-            'updated_at', 'edited_at', 'permission_group_id']
+    keys = ['url', 'html_url', 'author_id', 'permission_group_id']
     articles = [remove_keys(article, keys) for article in articles]
     save_to_file(articles, 'articles_for_migration')
 
@@ -143,10 +146,19 @@ def migrate_articles():
         url = make_destination_url(
             'sections', article['section_id'], 'articles')
         article.pop('section_id')
-        response = helpcenter.post(url, json={'article': article})
+        response = dst_helpcenter.post(url, json={'article': article})
         new_id = response.json()['article']['id']
         mapping.update({str(article['id']): str(new_id)})
     save_to_file(mapping, 'migrated_articles_mapping')
+
+
+def delete_all_destination_articles():
+    url = make_destination_url('articles')
+    articles = get(dst_helpcenter, 'articles', url)
+    print(f'Deleting {len(articles)} articles')
+    for article in articles:
+        dst_helpcenter.delete(make_destination_url('articles',  article['id']))
+    print('Done.')
 
 
 def migrate_attachments():
@@ -155,5 +167,5 @@ def migrate_attachments():
 
 if __name__ == '__main__':
     # get_articles_attachments()
-    # prepare_articles_for_migration()
-    # migrate_articles()
+    prepare_articles_for_migration()
+    migrate_articles()
